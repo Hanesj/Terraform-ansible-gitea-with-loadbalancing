@@ -1,0 +1,142 @@
+---
+- name: move ssh config
+  hosts: 127.0.0.1
+  connection: local 
+  tasks:
+    - name: Move Configs
+      shell: |
+        cp ../Terraform/config ./.ssh/config
+        cp ../Terraform/lbip.txt ./lbip.txt
+        cp ../Terraform/app.ini ./app.ini
+
+#- name:
+#  hosts: all
+#  tasks:
+#   - name: hosts
+#     ansible.builtin.known_hosts:
+#        path: /etc/ssh/ssh_known_hosts
+#        name: "{{item}}"
+#        key: "{{ lookup('ansible.builtin.file', '~/.ssh/id_rsa.pub') }}"
+#      loop: "{hostvars[inventory_hostname]['ansible_default_ipv4']['address']}"
+
+- name: Mysql installation
+  become: true
+  hosts: dbgroup
+  tasks:
+    - name: Installer Mysql and dependencies
+      package:
+        name: "{{item}}"
+        state: present
+        update_cache: yes
+      loop:
+        - mysql-server
+        - mysql-client
+        - python3-mysqldb
+        - libmysqlclient-dev
+      become: true
+    - name: Start and enable mysql
+      service:
+        name: mysql
+        state: started
+        enabled: yes
+    - name: Skapa användare
+      mysql_user:
+        name: gitea
+        password: gitea
+        priv: "*.*:ALL"
+        host: "%"
+        state: present
+
+    - name: Skapa db
+      mysql_db:
+        name: "giteadb"
+        state: present
+    #Öppna db för inkommane trafik
+    - name: Remote login
+      lineinfile:
+        path: /etc/mysql/mysql.conf.d/mysqld.cnf
+        regexp: "^bind-address"
+        line: "#bind-address = 0.0.0.0"
+        backup: yes
+      notify:
+      - Restart mysql
+    - name: Remote login 2
+      lineinfile:
+        path: /etc/mysql/mysql.conf.d/mysqld.cnf
+        regexp: "^mysqlx-bind-address"
+        line: "#mysqlx-bind-address = 127.0.0.1"
+      notify: 
+      - Restart mysql
+  handlers:
+  - name: Restart mysql
+    service:
+     name: mysql
+     state: restarted
+     
+#Gitea konfiguration samt nedladdning
+- name: gitea
+  hosts: giteagroup
+  become: true 
+  tasks: 
+    - name: install dependencies
+      package: 
+        name: "{{item}}"
+        state: present
+        update_cache: yes
+      loop:
+        - git
+        - wget
+    - name: Download gitea
+      ansible.builtin.get_url:
+        url: https://dl.gitea.io/gitea/1.16.7/gitea-1.16.7-linux-amd64
+        dest: /usr/local/bin/gitea
+        mode: +x
+    - name: Create group 
+      ansible.builtin.group:
+        name: git
+        system: true
+
+    - name: Create user
+      ansible.builtin.user:
+        shell: /bin/bash
+        name: git
+        comment: 'Git Version Control'
+        system: true
+        home: /home/git
+        group: git
+    
+    - name: Create and set directories
+      ansible.builtin.file:
+        path: "{{item}}"
+        state: directory
+        mode: 0750
+        recurse: true
+        owner: git
+        group: git
+      loop:
+        - /var/lib/gitea/custom
+        - /var/lib/gitea/data
+        - /var/lib/gitea/log
+
+    - name: Create gitea folder
+      ansible.builtin.file:
+        path: /etc/gitea
+        state: directory
+        owner: root
+        group: git
+        mode: 0770
+
+    - name: copy service    
+      ansible.builtin.copy:
+        src: ./gitea.service
+        dest: /etc/systemd/system/gitea.service
+    - name: copy app.ini 
+      ansible.builtin.copy:
+        src: ./app.ini
+        dest: /etc/gitea/app.ini
+        
+    - name: restart and enable service
+      ansible.builtin.systemd:
+        service: gitea.service
+        state: restarted
+        enabled: true
